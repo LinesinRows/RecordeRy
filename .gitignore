@@ -1,0 +1,12 @@
+## .NET / Visual Studio
+bin/
+obj/
+*.user
+.vs/
+
+## Build/publish artifacts (large binaries, generated per machine)
+publish/
+tools/
+
+## Claude Code local settings
+.claude/settings.local.json
