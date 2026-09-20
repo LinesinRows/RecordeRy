@@ -1,5 +1,6 @@
 ﻿using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Input;
@@ -174,6 +175,7 @@ public partial class MainWindow : Window
 
         _trayIcon.ShowWindowRequested += (_, _) => ShowMainWindow();
         _trayIcon.SaveReplayRequested += async (_, _) => await SaveReplayAsync();
+        _trayIcon.OpenVideoFolderRequested += (_, _) => OpenVideoFolder();
         _trayIcon.ExitRequested += async (_, _) => await ExitApplicationAsync();
     }
 
@@ -342,6 +344,27 @@ public partial class MainWindow : Window
         Show();
         WindowState = WindowState.Normal;
         Activate();
+    }
+
+    private void OpenVideoFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(_videoPath);
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = _videoPath,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            _trayIcon?.ShowBalloon(
+                "Klasör açılamadı",
+                ex.Message,
+                TrayNotificationKind.Error);
+        }
     }
 
     private async Task ExitApplicationAsync()

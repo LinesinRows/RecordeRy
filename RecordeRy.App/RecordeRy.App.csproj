@@ -12,8 +12,8 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
-    <Authors>_0x90 (UnknownCMD)</Authors>
-    <Company>_0x90 (UnknownCMD)</Company>
+    <Authors>LinesinRows</Authors>
+    <Company>LinesinRows</Company>
     <Product>RecordeRy</Product>
   </PropertyGroup>
 

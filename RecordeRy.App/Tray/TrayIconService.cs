@@ -16,6 +16,7 @@ public sealed class TrayIconService : IDisposable
 
     public event EventHandler? ShowWindowRequested;
     public event EventHandler? SaveReplayRequested;
+    public event EventHandler? OpenVideoFolderRequested;
     public event EventHandler? ExitRequested;
 
     public TrayIconService()
@@ -29,6 +30,10 @@ public sealed class TrayIconService : IDisposable
         var saveItem = menu.Items.Add("Replay Kaydet  (Ctrl+Shift+S)");
         saveItem.Click += (_, _) =>
             SaveReplayRequested?.Invoke(this, EventArgs.Empty);
+
+        var openFolderItem = menu.Items.Add("Kayıt Klasörünü Aç");
+        openFolderItem.Click += (_, _) =>
+            OpenVideoFolderRequested?.Invoke(this, EventArgs.Empty);
 
         menu.Items.Add(new ToolStripSeparator());
 

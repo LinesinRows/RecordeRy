@@ -196,7 +196,7 @@
                        FontSize="24"
                        FontWeight="SemiBold"
                        Foreground="White"/>
-            <TextBlock Text="_0x90 (UnknownCMD)"
+            <TextBlock Text="LinesinRows"
                        FontSize="13"
                        Foreground="#8B8F99"
                        Margin="0,2,0,0"/>
