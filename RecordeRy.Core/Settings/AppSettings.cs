@@ -6,6 +6,10 @@ public sealed class AppSettings
 
     public int Fps { get; set; } = 60;
 
+    public bool CaptureSystemAudio { get; set; } = true;
+
+    public bool CaptureMicrophone { get; set; } = true;
+
     public string HotkeyModifiers { get; set; } = "Control, Shift";
 
     public string HotkeyKey { get; set; } = "S";

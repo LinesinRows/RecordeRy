@@ -274,6 +274,18 @@
                                       Style="{StaticResource DarkComboBox}"/>
                         </Grid>
 
+                        <CheckBox x:Name="SystemAudioCheck"
+                                  Content="Sistem sesini kaydet (oyun, uygulamalar)"
+                                  Foreground="#C7CAD1"
+                                  FontSize="13"
+                                  Margin="0,10,0,6"/>
+
+                        <CheckBox x:Name="MicrophoneCheck"
+                                  Content="Mikrofonu kaydet"
+                                  Foreground="#C7CAD1"
+                                  FontSize="13"
+                                  Margin="0,0,0,0"/>
+
                         <TextBlock x:Name="SettingsHintText"
                                    Text="Değişiklikler arabelleği yeniden başlatır."
                                    Foreground="#6E7280"

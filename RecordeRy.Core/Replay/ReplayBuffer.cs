@@ -20,6 +20,8 @@ public sealed class ReplayBuffer : IAsyncDisposable
 
     private Stream? _ffmpegInput;
 
+    private readonly List<AudioPipeSource> _audioSources = new();
+
     private int _fps;
     private int _durationMinutes;
 
@@ -42,7 +44,9 @@ public sealed class ReplayBuffer : IAsyncDisposable
 
     public async Task StartAsync(
         int durationMinutes = 1,
-        int fps = 60)
+        int fps = 60,
+        bool captureSystemAudio = true,
+        bool captureMicrophone = true)
     {
         if (IsRunning)
         {
@@ -101,6 +105,42 @@ public sealed class ReplayBuffer : IAsyncDisposable
         Console.WriteLine(
             $"[ReplayBuffer] Seçilen encoder: {encoder.Name}");
 
+        PrepareAudioSources(
+            captureSystemAudio,
+            captureMicrophone);
+
+        var audioInputs = string.Concat(
+            _audioSources.Select(a =>
+                $"-thread_queue_size 1024 {a.InputFormatArgs} " +
+                $"-i \"{a.PipePath}\" "));
+
+        var audioArgs = string.Empty;
+
+        if (_audioSources.Count > 0)
+        {
+            var chains = string.Join(
+                ";",
+                _audioSources.Select((_, i) =>
+                    $"[{i + 1}:a]aresample=48000," +
+                    $"aformat=channel_layouts=stereo[a{i}]"));
+
+            var mixed = _audioSources.Count > 1
+                ? $";{string.Concat(_audioSources.Select((_, i) => $"[a{i}]"))}" +
+                  $"amix=inputs={_audioSources.Count}:duration=longest:normalize=0[aout]"
+                : string.Empty;
+
+            var map = _audioSources.Count > 1 ? "[aout]" : "[a0]";
+
+            audioArgs =
+                $"-filter_complex \"{chains}{mixed}\" " +
+                $"-map 0:v -map \"{map}\" " +
+                $"-c:a aac -b:a 160k ";
+        }
+        else
+        {
+            audioArgs = "-an ";
+        }
+
         var arguments =
             $"-hide_banner " +
             $"-loglevel warning " +
@@ -109,7 +149,8 @@ public sealed class ReplayBuffer : IAsyncDisposable
             $"-video_size {width}x{height} " +
             $"-framerate {fps} " +
             $"-i pipe:0 " +
-            $"-an " +
+            audioInputs +
+            audioArgs +
             $"-c:v {encoder.Name} " +
             $"{encoder.EncodeArgs} " +
             $"-pix_fmt yuv420p " +
@@ -153,6 +194,8 @@ public sealed class ReplayBuffer : IAsyncDisposable
         {
             process.Dispose();
 
+            await DisposeAudioSourcesAsync();
+
             _capture.Dispose();
             _capture = null;
 
@@ -163,6 +206,11 @@ public sealed class ReplayBuffer : IAsyncDisposable
         _process = process;
 
         process.BeginErrorReadLine();
+
+        foreach (var source in _audioSources)
+        {
+            source.BeginConnect();
+        }
 
         _ffmpegInput =
             process.StandardInput.BaseStream;
@@ -183,6 +231,53 @@ public sealed class ReplayBuffer : IAsyncDisposable
         await Task.CompletedTask;
     }
 
+
+    private void PrepareAudioSources(
+        bool captureSystemAudio,
+        bool captureMicrophone)
+    {
+        void TryAdd(bool loopback)
+        {
+            var source = new AudioPipeSource(loopback);
+
+            try
+            {
+                source.Prepare();
+                _audioSources.Add(source);
+            }
+            catch (Exception ex)
+            {
+                // Cihaz yoksa/açılamıyorsa video yine de kaydedilsin.
+                Debug.WriteLine(
+                    $"[ReplayBuffer] {(loopback ? "Sistem sesi" : "Mikrofon")} " +
+                    $"kullanılamadı: {ex.Message}");
+
+                _ = source.DisposeAsync();
+            }
+        }
+
+        if (captureSystemAudio)
+            TryAdd(loopback: true);
+
+        if (captureMicrophone)
+            TryAdd(loopback: false);
+    }
+
+    private async Task DisposeAudioSourcesAsync()
+    {
+        foreach (var source in _audioSources)
+        {
+            try
+            {
+                await source.DisposeAsync();
+            }
+            catch
+            {
+            }
+        }
+
+        _audioSources.Clear();
+    }
 
     private async Task CaptureLoopAsync(
     CancellationToken cancellationToken)
@@ -598,6 +693,8 @@ public sealed class ReplayBuffer : IAsyncDisposable
 
             _captureTask = null;
         }
+
+        await DisposeAudioSourcesAsync();
 
         try
         {

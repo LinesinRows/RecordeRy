@@ -86,7 +86,9 @@ public partial class MainWindow : Window
 
             await _replayBuffer.StartAsync(
                 durationMinutes: _settings.BufferDurationMinutes,
-                fps: _settings.Fps);
+                fps: _settings.Fps,
+                captureSystemAudio: _settings.CaptureSystemAudio,
+                captureMicrophone: _settings.CaptureMicrophone);
 
             Title = "RecordeRy - Replay Buffer Active";
 
@@ -94,6 +96,8 @@ public partial class MainWindow : Window
 
             BufferDurationCombo.SelectedItem = _settings.BufferDurationMinutes;
             FpsCombo.SelectedItem = _settings.Fps;
+            SystemAudioCheck.IsChecked = _settings.CaptureSystemAudio;
+            MicrophoneCheck.IsChecked = _settings.CaptureMicrophone;
 
             _hotkeyService = new GlobalHotkeyService(this);
 
@@ -217,8 +221,13 @@ public partial class MainWindow : Window
             ? f
             : _settings.Fps;
 
+        var systemAudio = SystemAudioCheck.IsChecked == true;
+        var microphone = MicrophoneCheck.IsChecked == true;
+
         if (duration == _settings.BufferDurationMinutes &&
-            fps == _settings.Fps)
+            fps == _settings.Fps &&
+            systemAudio == _settings.CaptureSystemAudio &&
+            microphone == _settings.CaptureMicrophone)
         {
             return;
         }
@@ -233,10 +242,14 @@ public partial class MainWindow : Window
 
             await _replayBuffer.StartAsync(
                 durationMinutes: duration,
-                fps: fps);
+                fps: fps,
+                captureSystemAudio: systemAudio,
+                captureMicrophone: microphone);
 
             _settings.BufferDurationMinutes = duration;
             _settings.Fps = fps;
+            _settings.CaptureSystemAudio = systemAudio;
+            _settings.CaptureMicrophone = microphone;
             SettingsStore.Save(_settings);
 
             UpdateStatusUi(active: true);
