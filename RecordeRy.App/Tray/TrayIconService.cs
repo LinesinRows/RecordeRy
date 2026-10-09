@@ -13,6 +13,7 @@ public enum TrayNotificationKind
 public sealed class TrayIconService : IDisposable
 {
     private readonly NotifyIcon _notifyIcon;
+    private Action? _balloonClickAction;
 
     public event EventHandler? ShowWindowRequested;
     public event EventHandler? SaveReplayRequested;
@@ -51,6 +52,16 @@ public sealed class TrayIconService : IDisposable
 
         _notifyIcon.DoubleClick += (_, _) =>
             ShowWindowRequested?.Invoke(this, EventArgs.Empty);
+
+        _notifyIcon.BalloonTipClicked += (_, _) =>
+        {
+            var action = _balloonClickAction;
+            _balloonClickAction = null;
+            action?.Invoke();
+        };
+
+        _notifyIcon.BalloonTipClosed += (_, _) =>
+            _balloonClickAction = null;
     }
 
     public void UpdateTooltip(string text)
@@ -63,8 +74,10 @@ public sealed class TrayIconService : IDisposable
     public void ShowBalloon(
         string title,
         string text,
-        TrayNotificationKind kind = TrayNotificationKind.Info)
+        TrayNotificationKind kind = TrayNotificationKind.Info,
+        Action? onClick = null)
     {
+        _balloonClickAction = onClick;
         _notifyIcon.BalloonTipTitle = title;
         _notifyIcon.BalloonTipText = text;
 

@@ -380,6 +380,33 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RevealFileInExplorer(string filePath)
+    {
+        try
+        {
+            if (File.Exists(filePath))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{filePath}\"",
+                    UseShellExecute = true
+                });
+            }
+            else
+            {
+                OpenVideoFolder();
+            }
+        }
+        catch (Exception ex)
+        {
+            _trayIcon?.ShowBalloon(
+                "Klasör açılamadı",
+                ex.Message,
+                TrayNotificationKind.Error);
+        }
+    }
+
     private async Task ExitApplicationAsync()
     {
         if (_isExiting)
@@ -417,7 +444,9 @@ public partial class MainWindow : Window
 
             _trayIcon?.ShowBalloon(
                 "Replay kaydedildi",
-                Path.GetFileName(output));
+                Path.GetFileName(output),
+                TrayNotificationKind.Info,
+                () => RevealFileInExplorer(output));
         }
         catch (Exception ex)
         {
