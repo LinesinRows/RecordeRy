@@ -210,7 +210,6 @@ public sealed class ReplayBuffer : IAsyncDisposable
             $"-segment_format_options " +
             $"movflags=+frag_keyframe+empty_moov+default_base_moof:" +
             $"frag_duration=250000 " +
-            $"-flush_packets 1 " +
             $"\"{outputPattern}\"";
 
         var startInfo =
@@ -263,6 +262,25 @@ public sealed class ReplayBuffer : IAsyncDisposable
         _process = process;
 
         ChildProcessTracker.Track(process);
+
+        /*
+         * İşlemci oyun tarafından tamamen doldurulduğunda (4 çekirdekte
+         * %100) normal öncelikli ffmpeg geç zamanlanıyor, video kuyruğu
+         * doluyor ve kayıt takılıyordu. ffmpeg az CPU kullandığı için
+         * önceliğini yükseltmek oyunu belirgin etkilemez (OBS de böyle).
+         */
+        try
+        {
+            process.PriorityClass = ProcessPriorityClass.AboveNormal;
+
+            // Yakalama geri çağrıları ve kayıt thread'leri için.
+            using var self = Process.GetCurrentProcess();
+            self.PriorityClass = ProcessPriorityClass.AboveNormal;
+        }
+        catch (Exception ex)
+        {
+            DiagnosticsLog.Write($"ffmpeg önceliği ayarlanamadı: {ex.Message}");
+        }
 
         process.BeginErrorReadLine();
 
@@ -394,13 +412,23 @@ public sealed class ReplayBuffer : IAsyncDisposable
 
         Interlocked.Exchange(ref _writtenFrames, 0);
 
-        var writerTask = WriterLoopAsync(
-            queue,
-            pool,
-            cancellationToken);
+        var writerTask = Task.Factory.StartNew(
+            () =>
+            {
+                Thread.CurrentThread.Priority = ThreadPriority.Highest;
+                WriterLoop(queue, pool, cancellationToken);
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
 
         var timingTask = Task.Factory.StartNew(
-            () => TimingLoop(queue, pool, cancellationToken),
+            () =>
+            {
+                // CPU doluyken kare zamanlaması kaymasın.
+                Thread.CurrentThread.Priority = ThreadPriority.Highest;
+                TimingLoop(queue, pool, cancellationToken);
+            },
             CancellationToken.None,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default);
@@ -424,23 +452,31 @@ public sealed class ReplayBuffer : IAsyncDisposable
         }
     }
 
-    private async Task WriterLoopAsync(
+    // Kendi (yüksek öncelikli) thread'inde senkron çalışır; thread
+    // pool'da normal öncelikte kalınca CPU doluyken geç kalıyordu.
+    private void WriterLoop(
         Channel<byte[]> queue,
         ConcurrentQueue<byte[]> pool,
         CancellationToken cancellationToken)
     {
         try
         {
-            await foreach (var frame in
-                           queue.Reader.ReadAllAsync(cancellationToken))
+            var reader = queue.Reader;
+
+            while (reader
+                   .WaitToReadAsync(cancellationToken)
+                   .AsTask()
+                   .GetAwaiter()
+                   .GetResult())
             {
-                await _ffmpegInput!.WriteAsync(
-                    frame,
-                    cancellationToken);
+                while (reader.TryRead(out var frame))
+                {
+                    _ffmpegInput!.Write(frame);
 
-                Interlocked.Increment(ref _writtenFrames);
+                    Interlocked.Increment(ref _writtenFrames);
 
-                pool.Enqueue(frame);
+                    pool.Enqueue(frame);
+                }
             }
         }
         catch (Exception ex) when (
