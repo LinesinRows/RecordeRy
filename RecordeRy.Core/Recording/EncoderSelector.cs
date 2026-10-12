@@ -19,17 +19,53 @@ public static class EncoderSelector
     private static readonly EncoderProfile Fallback =
         new("libx264", "-preset ultrafast -crf 28");
 
+    // Probe sonuçları ffmpeg yolu başına önbelleklenir (locator ve
+    // ReplayBuffer aynı ffmpeg'i ayrı ayrı sorgulamasın).
+    private static readonly Dictionary<string, EncoderProfile?> HardwareCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public static async Task<EncoderProfile> SelectAsync(
         string ffmpegPath,
         CancellationToken cancellationToken = default)
     {
+        return await FindHardwareAsync(ffmpegPath, cancellationToken)
+               ?? Fallback;
+    }
+
+    public static async Task<bool> HasHardwareEncoderAsync(
+        string ffmpegPath,
+        CancellationToken cancellationToken = default)
+    {
+        return await FindHardwareAsync(ffmpegPath, cancellationToken) != null;
+    }
+
+    private static async Task<EncoderProfile?> FindHardwareAsync(
+        string ffmpegPath,
+        CancellationToken cancellationToken)
+    {
+        lock (HardwareCache)
+        {
+            if (HardwareCache.TryGetValue(ffmpegPath, out var cached))
+                return cached;
+        }
+
+        EncoderProfile? found = null;
+
         foreach (var candidate in Candidates)
         {
             if (await ProbeAsync(ffmpegPath, candidate, cancellationToken))
-                return candidate;
+            {
+                found = candidate;
+                break;
+            }
         }
 
-        return Fallback;
+        lock (HardwareCache)
+        {
+            HardwareCache[ffmpegPath] = found;
+        }
+
+        return found;
     }
 
     private static async Task<bool> ProbeAsync(

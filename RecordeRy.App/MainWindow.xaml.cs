@@ -2,6 +2,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -9,6 +10,7 @@ using System.Windows.Media;
 using RecordeRy.App.Hotkeys;
 using RecordeRy.App.Tray;
 using RecordeRy.Core;
+using RecordeRy.Core.Capture;
 using RecordeRy.Core.Replay;
 using RecordeRy.Core.Settings;
 
@@ -17,7 +19,19 @@ namespace RecordeRy.App;
 public partial class MainWindow : Window
 {
     private static readonly int[] BufferDurationOptions = [1, 2, 3, 5, 10, 15, 20, 30];
-    private static readonly int[] FpsOptions = [24, 25, 30, 60];
+    private static readonly int[] FpsOptions = BuildFpsOptions();
+
+    // Standart seçenekler + monitörün yenileme hızına kadar olanlar.
+    private static int[] BuildFpsOptions()
+    {
+        var hz = DesktopDuplicationCapture.GetPrimaryRefreshRate();
+
+        return new[] { 24, 25, 30, 60, 90, 120, 144, 165, 240, hz }
+            .Where(f => f <= Math.Max(hz, 60))
+            .Distinct()
+            .Order()
+            .ToArray();
+    }
 
     private static readonly SolidColorBrush ActiveBrush =
         new(System.Windows.Media.Color.FromRgb(0x4C, 0xAF, 0x50));
@@ -60,7 +74,7 @@ public partial class MainWindow : Window
         {
             _settings = SettingsStore.Load();
 
-            _ffmpegPath = FfmpegLocator.Resolve(
+            _ffmpegPath = await FfmpegLocator.ResolveAsync(
                 AppContext.BaseDirectory);
 
             _bufferPath = Path.Combine(

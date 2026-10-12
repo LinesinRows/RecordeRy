@@ -16,6 +16,8 @@ public sealed class DesktopDuplicationCapture : IDisposable
     private IDXGIOutputDuplication? _duplication;
     private ID3D11Texture2D? _stagingTexture;
 
+    private byte[]? _frameBuffer;
+
     private int _width;
     private int _height;
 
@@ -24,6 +26,91 @@ public sealed class DesktopDuplicationCapture : IDisposable
     public int Width => _width;
     public int Height => _height;
     public bool IsInitialized => _initialized;
+
+    private const int EnumCurrentSettings = -1;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DevMode
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string dmDeviceName;
+        public ushort dmSpecVersion;
+        public ushort dmDriverVersion;
+        public ushort dmSize;
+        public ushort dmDriverExtra;
+        public uint dmFields;
+        public int dmPositionX;
+        public int dmPositionY;
+        public uint dmDisplayOrientation;
+        public uint dmDisplayFixedOutput;
+        public short dmColor;
+        public short dmDuplex;
+        public short dmYResolution;
+        public short dmTTOption;
+        public short dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string dmFormName;
+        public ushort dmLogPixels;
+        public uint dmBitsPerPel;
+        public uint dmPelsWidth;
+        public uint dmPelsHeight;
+        public uint dmDisplayFlags;
+        public uint dmDisplayFrequency;
+        public uint dmICMMethod;
+        public uint dmICMIntent;
+        public uint dmMediaType;
+        public uint dmDitherType;
+        public uint dmReserved1;
+        public uint dmReserved2;
+        public uint dmPanningWidth;
+        public uint dmPanningHeight;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplaySettingsW(
+        string? deviceName,
+        int modeNum,
+        ref DevMode devMode);
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint period);
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeEndPeriod(uint period);
+
+    /// <summary>
+    /// Ana monitörün güncel yenileme hızını (Hz) döndürür.
+    /// Okunamazsa 60 döner.
+    /// </summary>
+    public static int GetPrimaryRefreshRate()
+    {
+        try
+        {
+            var mode = new DevMode
+            {
+                dmSize = (ushort)Marshal.SizeOf<DevMode>()
+            };
+
+            if (EnumDisplaySettingsW(null, EnumCurrentSettings, ref mode) &&
+                mode.dmDisplayFrequency > 1)
+            {
+                return (int)mode.dmDisplayFrequency;
+            }
+        }
+        catch
+        {
+        }
+
+        return 60;
+    }
+
+    /// <summary>
+    /// Windows zamanlayıcı çözünürlüğünü 1 ms'e çeker; yoksa
+    /// Task.Delay ~15 ms adımlarla uyanır ve yüksek FPS'te frame atlar.
+    /// </summary>
+    public static void BeginHighResolutionTimer() => timeBeginPeriod(1);
+
+    public static void EndHighResolutionTimer() => timeEndPeriod(1);
 
     public void Initialize(int outputIndex = 0)
     {
@@ -128,7 +215,8 @@ public sealed class DesktopDuplicationCapture : IDisposable
     public bool TryCaptureFrame(
         out byte[]? pixels,
         out int width,
-        out int height)
+        out int height,
+        int timeoutMs = 0)
     {
         pixels = null;
 
@@ -162,7 +250,7 @@ public sealed class DesktopDuplicationCapture : IDisposable
              */
             var result =
                 _duplication.AcquireNextFrame(
-                    0,
+                    (uint)Math.Max(0, timeoutMs),
                     out _,
                     out desktopResource);
 
@@ -201,24 +289,45 @@ public sealed class DesktopDuplicationCapture : IDisposable
                     var rowSize =
                         _width * bytesPerPixel;
 
-                    var output =
-                        new byte[
-                            rowSize * _height];
+                    /*
+                     * Her frame için yeni (LOH'ta ~8 MB) dizi ayırmak
+                     * sürekli Gen2 GC duraklamalarına yol açıyordu;
+                     * tek bir buffer'ı yeniden kullanıyoruz. Çağıran
+                     * taraf frame'i bir sonraki TryCaptureFrame
+                     * çağrısından önce işlemeyi bitirmelidir.
+                     */
+                    var totalSize = rowSize * _height;
 
-                    for (var y = 0;
-                         y < _height;
-                         y++)
+                    if (_frameBuffer == null ||
+                        _frameBuffer.Length != totalSize)
                     {
-                        var source =
-                            IntPtr.Add(
-                                mapped.DataPointer,
-                                y * (int)rowPitch);
+                        _frameBuffer = new byte[totalSize];
+                    }
 
+                    var output = _frameBuffer;
+
+                    if ((int)rowPitch == rowSize)
+                    {
                         Marshal.Copy(
-                            source,
+                            mapped.DataPointer,
                             output,
-                            y * rowSize,
-                            rowSize);
+                            0,
+                            totalSize);
+                    }
+                    else
+                    {
+                        for (var y = 0;
+                             y < _height;
+                             y++)
+                        {
+                            Marshal.Copy(
+                                IntPtr.Add(
+                                    mapped.DataPointer,
+                                    y * (int)rowPitch),
+                                output,
+                                y * rowSize,
+                                rowSize);
+                        }
                     }
 
                     pixels = output;

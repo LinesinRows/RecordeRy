@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO.Pipes;
+using System.Threading.Channels;
 using System.Security.Cryptography;
 using RecordeRy.Core.Capture;
 using RecordeRy.Core.Recording;
@@ -10,7 +13,7 @@ public sealed class ReplayBuffer : IAsyncDisposable
     private readonly string _ffmpegPath;
     private readonly string _bufferDirectory;
 
-    private DesktopDuplicationCapture? _capture;
+    private WgcCapture? _capture;
 
     private Process? _process;
     private CancellationTokenSource? _cts;
@@ -23,6 +26,7 @@ public sealed class ReplayBuffer : IAsyncDisposable
     private readonly List<AudioPipeSource> _audioSources = new();
 
     private int _fps;
+    private bool _timerRaised;
     private int _durationMinutes;
 
     public bool IsRunning =>
@@ -60,11 +64,11 @@ public sealed class ReplayBuffer : IAsyncDisposable
                 nameof(durationMinutes));
         }
 
-        if (fps is not (24 or 25 or 30 or 60))
+        if (fps is < 1 or > 360)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(fps),
-                "FPS 24, 25, 30 veya 60 olmalıdır.");
+                "FPS 1 ile 360 arasında olmalıdır.");
         }
 
         _durationMinutes = durationMinutes;
@@ -76,9 +80,12 @@ public sealed class ReplayBuffer : IAsyncDisposable
         CleanupAllSegments();
 
         _capture =
-            new DesktopDuplicationCapture();
+            new WgcCapture();
 
         _capture.Initialize();
+
+        DesktopDuplicationCapture.BeginHighResolutionTimer();
+        _timerRaised = true;
 
         var width = _capture.Width;
         var height = _capture.Height;
@@ -111,7 +118,8 @@ public sealed class ReplayBuffer : IAsyncDisposable
 
         var audioInputs = string.Concat(
             _audioSources.Select(a =>
-                $"-thread_queue_size 1024 {a.InputFormatArgs} " +
+                $"-thread_queue_size 1024 " +
+                $"-probesize 32 -analyzeduration 0 {a.InputFormatArgs} " +
                 $"-i \"{a.PipePath}\" "));
 
         var audioArgs = string.Empty;
@@ -141,19 +149,56 @@ public sealed class ReplayBuffer : IAsyncDisposable
             audioArgs = "-an ";
         }
 
+        /*
+         * Ham video, StandardInput yerine büyük tamponlu bir named
+         * pipe ile gönderilir. StandardInput'un ~4 KB'lık tamponu
+         * yüzünden her 8 MB'lık 1080p kare binlerce küçük parçaya
+         * bölünüyor ve 144 FPS'te aktarım tek başına darboğaz oluyordu.
+         */
+        var frameBytes = width * height * 3 / 2;
+
+        var videoPipeName =
+            $"RecordeRy_video_{Guid.NewGuid():N}";
+
+        var videoPipePath = $@"\\.\pipe\{videoPipeName}";
+
+        var videoPipe =
+            new NamedPipeServerStream(
+                videoPipeName,
+                PipeDirection.Out,
+                1,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous,
+                0,
+                frameBytes * 2);
+
         var arguments =
             $"-hide_banner " +
+            $"-nostdin " +
             $"-loglevel warning " +
+            // Girdi formatları açıkça verildiği için FFmpeg'in
+            // açılıştaki analizine gerek yok; bu analiz video
+            // pipe'ını saniyelerce okumadan bekletiyordu.
+            $"-probesize 32 " +
+            $"-analyzeduration 0 " +
+            $"-thread_queue_size 64 " +
             $"-f rawvideo " +
-            $"-pixel_format bgra " +
+            // Kareler GPU'da NV12'ye çevrilmiş geliyor (WgcCapture);
+            // tüm encoder'lar NV12'yi doğrudan kabul ediyor.
+            $"-pixel_format nv12 " +
             $"-video_size {width}x{height} " +
             $"-framerate {fps} " +
-            $"-i pipe:0 " +
+            $"-i \"{videoPipePath}\" " +
             audioInputs +
             audioArgs +
             $"-c:v {encoder.Name} " +
             $"{encoder.EncodeArgs} " +
-            $"-pix_fmt yuv420p " +
+            // Renk bilgisi (BT.709, sınırlı aralık) yalnızca bitstream'e
+            // yazılır. -color_range/-colorspace çıkış seçenekleri FFmpeg'e
+            // CPU'da dönüşüm ekletip hızı ~420'den ~70 FPS'e düşürüyordu.
+            $"-bsf:v h264_metadata=video_full_range_flag=0:" +
+            $"colour_primaries=1:transfer_characteristics=1:" +
+            $"matrix_coefficients=1 " +
             $"-force_key_frames \"expr:gte(t,n_forced*2)\" " +
             $"-f segment " +
             $"-segment_time 2 " +
@@ -187,17 +232,21 @@ public sealed class ReplayBuffer : IAsyncDisposable
             {
                 Debug.WriteLine(
                     $"[ReplayBuffer] {e.Data}");
+
+                DiagnosticsLog.Write($"ffmpeg: {e.Data}");
             }
         };
 
         if (!process.Start())
         {
             process.Dispose();
+            await videoPipe.DisposeAsync();
 
             await DisposeAudioSourcesAsync();
 
             _capture.Dispose();
             _capture = null;
+            ReleaseTimer();
 
             throw new InvalidOperationException(
                 "FFmpeg başlatılamadı.");
@@ -212,8 +261,26 @@ public sealed class ReplayBuffer : IAsyncDisposable
             source.BeginConnect();
         }
 
-        _ffmpegInput =
-            process.StandardInput.BaseStream;
+        using (var connectTimeout =
+                   new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+        {
+            try
+            {
+                await videoPipe.WaitForConnectionAsync(
+                    connectTimeout.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                await videoPipe.DisposeAsync();
+
+                await StopAsync();
+
+                throw new InvalidOperationException(
+                    "FFmpeg video girişine bağlanmadı.");
+            }
+        }
+
+        _ffmpegInput = videoPipe;
 
         _cts =
             new CancellationTokenSource();
@@ -279,37 +346,134 @@ public sealed class ReplayBuffer : IAsyncDisposable
         _audioSources.Clear();
     }
 
+    /*
+     * Kayıt iki bağımsız parçadan oluşur:
+     *
+     *  - Zamanlayıcı (ayrı thread): tam 1/fps aralıklarla o anki son
+     *    ekran görüntüsünü kopyalayıp kuyruğa koyar. Böylece her
+     *    karenin içeriği kendi zamanında alınır.
+     *
+     *  - Yazıcı: kuyruğu FFmpeg'e boşaltır. FFmpeg video okumasını ses
+     *    akışıyla senkron yürüttüğü için pipe yazmaları ara ara onlarca
+     *    ms bloklanır. Eskiden bu bekleme zamanlamayı da durduruyor,
+     *    kaçırılan kareler aynı görüntüyle art arda yazılıyordu (donma +
+     *    sıçrama). Kuyruk bu dalgalanmayı emer.
+     */
+    private const int FrameQueueCapacity = 48;
+
+    private long _writtenFrames;
+
     private async Task CaptureLoopAsync(
-    CancellationToken cancellationToken)
+        CancellationToken cancellationToken)
     {
-        Console.WriteLine("[ReplayBuffer] CaptureLoopAsync BAŞLADI");
-        
         if (_capture == null ||
             _ffmpegInput == null)
         {
             return;
         }
 
+        var queue = Channel.CreateBounded<byte[]>(
+            new BoundedChannelOptions(FrameQueueCapacity)
+            {
+                SingleReader = true,
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait
+            });
+
+        var pool = new ConcurrentQueue<byte[]>();
+
+        Interlocked.Exchange(ref _writtenFrames, 0);
+
+        var writerTask = WriterLoopAsync(
+            queue,
+            pool,
+            cancellationToken);
+
+        var timingTask = Task.Factory.StartNew(
+            () => TimingLoop(queue, pool, cancellationToken),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+        try
+        {
+            await timingTask;
+        }
+        catch
+        {
+        }
+
+        queue.Writer.TryComplete();
+
+        try
+        {
+            await writerTask;
+        }
+        catch
+        {
+        }
+    }
+
+    private async Task WriterLoopAsync(
+        Channel<byte[]> queue,
+        ConcurrentQueue<byte[]> pool,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var frame in
+                           queue.Reader.ReadAllAsync(cancellationToken))
+            {
+                await _ffmpegInput!.WriteAsync(
+                    frame,
+                    cancellationToken);
+
+                Interlocked.Increment(ref _writtenFrames);
+
+                pool.Enqueue(frame);
+            }
+        }
+        catch (Exception ex) when (
+            ex is OperationCanceledException or
+                IOException or
+                ObjectDisposedException)
+        {
+        }
+        catch (Exception ex)
+        {
+            DiagnosticsLog.Write($"Yazıcı hatası: {ex.Message}");
+        }
+        finally
+        {
+            // Zamanlayıcı kuyruk doluyken bekliyorsa serbest kalsın.
+            queue.Writer.TryComplete();
+        }
+    }
+
+    private void TimingLoop(
+        Channel<byte[]> queue,
+        ConcurrentQueue<byte[]> pool,
+        CancellationToken cancellationToken)
+    {
+        var capture = _capture!;
+
         var frameInterval =
             TimeSpan.FromSeconds(1.0 / _fps);
 
-        var stopwatch =
-            Stopwatch.StartNew();
+        var stopwatch = Stopwatch.StartNew();
+        var nextFrameTime = TimeSpan.Zero;
+        var started = false;
 
-        var nextFrameTime =
-            stopwatch.Elapsed;
+        byte[]? latest = null;
 
-        long capturedFrames = 0;
-        long writtenFrames = 0;
-        long duplicateFrames = 0;
-        long uniqueFrames = 0;
-        long reusedFrames = 0;
-
-        var lastHash = 0UL;
-        byte[]? lastFrame = null;
-
-        var statsTimer =
-            Stopwatch.StartNew();
+        // Teşhis (2 sn'lik pencere).
+        var statsTimer = Stopwatch.StartNew();
+        long consumed = 0;
+        long queuedFrames = 0;
+        long lateTicks = 0;
+        long queueFullStalls = 0;
+        var maxDue = 0;
+        long lastWritten = 0;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -321,258 +485,138 @@ public sealed class ReplayBuffer : IAsyncDisposable
                     break;
                 }
 
-                var now =
-                    stopwatch.Elapsed;
+                var now = stopwatch.Elapsed;
 
-                if (now < nextFrameTime)
+                if (started && now < nextFrameTime)
                 {
-                    var delay =
-                        nextFrameTime - now;
+                    // Sıradaki kare zamanına kadar yeni ekran karesi bekle.
+                    var waitMs = (int)Math.Ceiling(
+                        (nextFrameTime - now).TotalMilliseconds);
 
-                    if (delay >
-                        TimeSpan.FromMilliseconds(1))
+                    if (capture.TryCaptureFrame(
+                            out var waited, out _, out _, waitMs) &&
+                        waited != null)
                     {
-                        await Task.Delay(
-                            delay,
-                            cancellationToken);
+                        latest = waited;
+                        consumed++;
                     }
 
                     continue;
                 }
 
-                var gotFrame =
-                    _capture.TryCaptureFrame(
-                        out var pixels,
-                        out _,
-                        out _);
-
-                if (gotFrame && pixels != null)
+                if (capture.TryCaptureFrame(
+                        out var pixels, out _, out _) &&
+                    pixels != null)
                 {
-                    capturedFrames++;
-
-                    /*
-                     * Frame'in içeriğinden basit bir hash oluştur.
-                     * Aynı görüntünün tekrar tekrar gelip gelmediğini
-                     * anlamak için kullanıyoruz.
-                     */
-                    ulong hash = 14695981039346656037UL;
-
-                    // Her byte'ı kontrol etmek yerine örnekleme yapıyoruz.
-                    // Böylece CPU'yu gereksiz yere yormuyoruz.
-                    const int sampleStep = 4096;
-
-                    for (
-                        var i = 0;
-                        i < pixels.Length;
-                        i += sampleStep)
-                    {
-                        hash ^= pixels[i];
-                        hash *= 1099511628211UL;
-                    }
-
-                    if (capturedFrames > 1)
-                    {
-                        if (hash == lastHash)
-                        {
-                            duplicateFrames++;
-                        }
-                        else
-                        {
-                            uniqueFrames++;
-                        }
-                    }
-                    else
-                    {
-                        uniqueFrames = 1;
-                    }
-
-                    lastHash = hash;
-                    lastFrame = pixels;
+                    latest = pixels;
+                    consumed++;
                 }
 
-                if (lastFrame == null)
+                if (latest == null)
                 {
-                    /*
-                     * Henüz hiç frame yakalanmadı; başlangıç
-                     * gecikmesinin zaman çizelgesini kaydırmasını
-                     * önlemek için saati şimdiye sabitliyoruz.
-                     */
+                    // Henüz hiç kare gelmedi.
+                    Thread.Sleep(1);
+                    continue;
+                }
+
+                if (!started)
+                {
+                    started = true;
                     nextFrameTime = stopwatch.Elapsed;
-
-                    await Task.Delay(
-                        1,
-                        cancellationToken);
-
-                    continue;
                 }
 
-                /*
-                 * Bu noktaya kadar geçen gerçek süre, tek bir
-                 * frame aralığından fazla olabilir (ör. capture
-                 * veya encode pipeline'ı bir anlık yavaşladıysa).
-                 * FFmpeg'e "-framerate {fps}" ile CFR (sabit frame
-                 * rate) varsayımıyla veri gönderdiğimiz için, her
-                 * loop turunda sadece 1 frame yazıp zaman çizelgesini
-                 * yalnızca 1 frameInterval ilerletirsek, gerçek geçen
-                 * süre ile video süresi arasında kayma birikir ve
-                 * video gerçek süreden kısa/hızlı oynatılmış gibi
-                 * görünür. Bunun yerine, gerçek zamanda kaç frame
-                 * "vadesi geldiyse" o kadarını (gerekirse aynı
-                 * frame'i tekrar ederek) yazıp zaman çizelgesini
-                 * tam olarak o kadar ilerletiyoruz.
-                 */
                 now = stopwatch.Elapsed;
 
+                /*
+                 * FFmpeg'e CFR (-framerate {fps}) veriyoruz; geçen gerçek
+                 * süre kadar kare yazılmalı ki video ile ses aynı hızda
+                 * aksın. Zamanlayıcı artık pipe'ta beklemediği için
+                 * normalde due = 1'dir.
+                 */
                 var due =
                     (int)((now - nextFrameTime) / frameInterval) + 1;
+
+                if (due > 1)
+                    lateTicks++;
 
                 var maxCatchUpFrames = _fps * 5;
 
                 if (due > maxCatchUpFrames)
                 {
                     due = maxCatchUpFrames;
-
-                    Console.WriteLine(
-                        $"[ReplayBuffer] Büyük gecikme, " +
-                        $"{due} frame ile yetişiliyor ve " +
-                        "zaman çizelgesi yeniden senkronize ediliyor.");
+                    nextFrameTime = now - frameInterval * (due - 1);
                 }
+
+                maxDue = Math.Max(maxDue, due);
 
                 for (var i = 0; i < due; i++)
                 {
-                    await _ffmpegInput.WriteAsync(
-                        lastFrame,
-                        cancellationToken);
+                    if (!pool.TryDequeue(out var buffer) ||
+                        buffer.Length != latest.Length)
+                    {
+                        buffer = new byte[latest.Length];
+                    }
 
-                    writtenFrames++;
+                    Buffer.BlockCopy(latest, 0, buffer, 0, latest.Length);
+
+                    if (!queue.Writer.TryWrite(buffer))
+                    {
+                        queueFullStalls++;
+
+                        queue.Writer
+                            .WriteAsync(buffer, cancellationToken)
+                            .AsTask()
+                            .GetAwaiter()
+                            .GetResult();
+                    }
+
+                    queuedFrames++;
                 }
 
-                reusedFrames +=
-                    gotFrame
-                        ? due - 1
-                        : due;
+                nextFrameTime += frameInterval * due;
 
-                nextFrameTime += due * frameInterval;
-
-                if (now - nextFrameTime > TimeSpan.FromSeconds(5))
+                if (statsTimer.Elapsed >= TimeSpan.FromSeconds(2))
                 {
-                    nextFrameTime = stopwatch.Elapsed;
-                }
+                    var window = statsTimer.Elapsed.TotalSeconds;
 
-                /*
-                 * Her 2 saniyede bir gerçek istatistikleri yaz.
-                 */
-                if (statsTimer.Elapsed >=
-                    TimeSpan.FromSeconds(2))
-                {
-                    var elapsed =
-                        stopwatch.Elapsed.TotalSeconds;
+                    var (arrived, handlerMs) = capture.TakeStats();
 
-                    var captureFps =
-                        elapsed > 0
-                            ? capturedFrames / elapsed
-                            : 0;
+                    var written = Interlocked.Read(ref _writtenFrames);
 
-                    var uniquePercent =
-                        capturedFrames > 0
-                            ? (uniqueFrames * 100.0) /
-                              capturedFrames
-                            : 0;
+                    DiagnosticsLog.Write(
+                        $"wgcArrived/s={arrived / window:F1} " +
+                        $"wgcAvgMs={(arrived > 0 ? handlerMs / arrived : 0):F2} " +
+                        $"capFps={consumed / window:F1} " +
+                        $"queuedFps={queuedFrames / window:F1} " +
+                        $"writeFps={(written - lastWritten) / window:F1} " +
+                        $"queue={queue.Reader.Count} " +
+                        $"late={lateTicks} maxDue={maxDue} " +
+                        $"fullStalls={queueFullStalls}");
 
-                    Console.WriteLine(
-                        $"Captured: {capturedFrames}");
-
-                    Console.WriteLine(
-                        $"Written: {writtenFrames}");
-
-                    Console.WriteLine(
-                        $"Reused (no change): {reusedFrames}");
-
-                    Console.WriteLine(
-                        $"Duplicates: {duplicateFrames}");
-
-                    Console.WriteLine(
-                        $"Unique: {uniqueFrames}");
-
-                    Console.WriteLine(
-                        $"Capture FPS: {captureFps:F2}");
-
-                    Console.WriteLine(
-                        $"Unique %: {uniquePercent:F1}%");
-
-                    Console.WriteLine(
-                        "------------------------------");
+                    consumed = 0;
+                    queuedFrames = 0;
+                    lateTicks = 0;
+                    queueFullStalls = 0;
+                    maxDue = 0;
+                    lastWritten = written;
 
                     statsTimer.Restart();
                 }
             }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (IOException)
-            {
-                break;
-            }
-            catch (ObjectDisposedException)
+            catch (Exception ex) when (
+                ex is OperationCanceledException or
+                    ChannelClosedException or
+                    ObjectDisposedException)
             {
                 break;
             }
             catch (Exception ex)
             {
-                Console.WriteLine(
-                    $"[ReplayBuffer] Capture error: {ex}");
+                DiagnosticsLog.Write($"Zamanlayıcı hatası: {ex.Message}");
 
-                await Task.Delay(
-                    50,
-                    cancellationToken);
+                Thread.Sleep(50);
             }
         }
-
-        /*
-         * Son istatistikleri mutlaka yaz.
-         */
-        var totalSeconds =
-            stopwatch.Elapsed.TotalSeconds;
-
-        var finalCaptureFps =
-            totalSeconds > 0
-                ? capturedFrames / totalSeconds
-                : 0;
-
-        var finalUniquePercent =
-            capturedFrames > 0
-                ? (uniqueFrames * 100.0) /
-                  capturedFrames
-                : 0;
-
-        Console.WriteLine();
-        Console.WriteLine(
-            "========== FINAL CAPTURE STATS ==========");
-
-        Console.WriteLine(
-            $"Captured: {capturedFrames}");
-
-        Console.WriteLine(
-            $"Written: {writtenFrames}");
-
-        Console.WriteLine(
-            $"Reused (no change): {reusedFrames}");
-
-        Console.WriteLine(
-            $"Duplicates: {duplicateFrames}");
-
-        Console.WriteLine(
-            $"Unique: {uniqueFrames}");
-
-        Console.WriteLine(
-            $"Capture FPS: {finalCaptureFps:F2}");
-
-        Console.WriteLine(
-            $"Unique %: {finalUniquePercent:F1}%");
-
-        Console.WriteLine(
-            "==========================================");
     }
 
 
@@ -766,6 +810,16 @@ public sealed class ReplayBuffer : IAsyncDisposable
 
         _capture?.Dispose();
         _capture = null;
+        ReleaseTimer();
+    }
+
+    private void ReleaseTimer()
+    {
+        if (!_timerRaised)
+            return;
+
+        DesktopDuplicationCapture.EndHighResolutionTimer();
+        _timerRaised = false;
     }
 
     public async ValueTask DisposeAsync()

@@ -1,15 +1,65 @@
+using RecordeRy.Core.Recording;
+
 namespace RecordeRy.Core;
 
+/// <summary>
+/// ffmpeg.exe'yi bulur. İki sürüm birlikte dağıtılır:
+///  - ffmpeg/        : güncel FFmpeg (yeni sürücülerle en iyi sonuç)
+///  - ffmpeg-legacy/ : FFmpeg 7.1.x (eski NVIDIA sürücüleri için)
+/// Güncel FFmpeg'in NVENC'i yeni bir sürücü istiyor (ör. 9.x → 610+);
+/// Maxwell/Pascal gibi kartlar bu sürücüyü alamadığından donanım encoder'ı
+/// açılmaz ve CPU'ya düşülür. Bu yüzden hangi sürümün bu sistemde donanım
+/// encoder'ını açabildiği denenerek seçilir.
+/// </summary>
 public static class FfmpegLocator
 {
     private const int MaxAncestorLevels = 8;
 
-    public static string Resolve(string baseDirectory)
+    private const string CurrentFolder = "ffmpeg";
+    private const string LegacyFolder = "ffmpeg-legacy";
+
+    public static async Task<string> ResolveAsync(string baseDirectory)
+    {
+        var current = Find(baseDirectory, CurrentFolder);
+        var legacy = Find(baseDirectory, LegacyFolder);
+
+        if (current == null && legacy == null)
+        {
+            throw new FileNotFoundException(
+                "ffmpeg.exe bulunamadı. Uygulamanın yanında " +
+                $"'{CurrentFolder}' veya '{LegacyFolder}' klasörü olmalı.");
+        }
+
+        if (current == null)
+            return legacy!;
+
+        if (legacy == null)
+            return current;
+
+        if (await EncoderSelector.HasHardwareEncoderAsync(current))
+        {
+            DiagnosticsLog.Write($"FFmpeg: güncel sürüm seçildi ({current})");
+            return current;
+        }
+
+        if (await EncoderSelector.HasHardwareEncoderAsync(legacy))
+        {
+            DiagnosticsLog.Write(
+                $"FFmpeg: güncel sürümde donanım encoder'ı açılamadı, " +
+                $"legacy sürüm seçildi ({legacy})");
+            return legacy;
+        }
+
+        // İkisinde de donanım encoder'ı yok; CPU encoder'ı için güncel sürüm.
+        DiagnosticsLog.Write("FFmpeg: donanım encoder'ı yok, güncel sürüm (CPU)");
+        return current;
+    }
+
+    private static string? Find(string baseDirectory, string folder)
     {
         var candidates = new List<string>
         {
-            Path.Combine(baseDirectory, "ffmpeg", "ffmpeg.exe"),
-            Path.Combine(baseDirectory, "tools", "ffmpeg", "ffmpeg.exe")
+            Path.Combine(baseDirectory, folder, "ffmpeg.exe")
         };
 
         var directory = new DirectoryInfo(baseDirectory);
@@ -17,20 +67,14 @@ public static class FfmpegLocator
         for (var i = 0; i < MaxAncestorLevels && directory != null; i++)
         {
             candidates.Add(
-                Path.Combine(directory.FullName, "tools", "ffmpeg", "ffmpeg.exe"));
+                Path.Combine(directory.FullName, "tools", folder, "ffmpeg.exe"));
 
             directory = directory.Parent;
         }
 
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
-                return Path.GetFullPath(candidate);
-        }
-
-        throw new FileNotFoundException(
-            "ffmpeg.exe bulunamadı. Aranan konumlar:" +
-            Environment.NewLine +
-            string.Join(Environment.NewLine, candidates.Distinct()));
+        return candidates
+            .Where(File.Exists)
+            .Select(Path.GetFullPath)
+            .FirstOrDefault();
     }
 }
