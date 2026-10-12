@@ -49,16 +49,15 @@ public static class EncoderSelector
                 return cached;
         }
 
-        EncoderProfile? found = null;
+        // Her probe ~1 sn sürüyor (ffmpeg'in açılışı); sırayla değil
+        // paralel çalıştırıp öncelik sırasına göre ilk başarılıyı seçiyoruz.
+        var results = await Task.WhenAll(
+            Candidates.Select(candidate =>
+                ProbeAsync(ffmpegPath, candidate, cancellationToken)));
 
-        foreach (var candidate in Candidates)
-        {
-            if (await ProbeAsync(ffmpegPath, candidate, cancellationToken))
-            {
-                found = candidate;
-                break;
-            }
-        }
+        var found = Candidates
+            .Where((_, i) => results[i])
+            .FirstOrDefault();
 
         lock (HardwareCache)
         {

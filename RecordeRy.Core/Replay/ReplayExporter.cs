@@ -39,6 +39,48 @@ public sealed class ReplayExporter
 
         try
         {
+            try
+            {
+                return await ConcatAsync(concatFile, outputPath, segments);
+            }
+            catch (InvalidOperationException) when (segments.Count > 1)
+            {
+                /*
+                 * Son segment hâlâ yazılıyor; yeni açılmış ve henüz
+                 * başlığı yazılmamışsa okunamaz. Onsuz tekrar dene.
+                 */
+                return await ConcatAsync(
+                    concatFile,
+                    outputPath,
+                    segments.Take(segments.Count - 1).ToList());
+            }
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(concatFile))
+                {
+                    File.Delete(concatFile);
+                }
+            }
+            catch
+            {
+                // Temizlik başarısız olsa da replay dosyasını etkilemesin.
+            }
+        }
+    }
+
+    private async Task<string> ConcatAsync(
+        string concatFile,
+        string outputPath,
+        IReadOnlyList<string> segments)
+    {
+        {
+            // Önceki başarısız denemeden kalmış yarım dosya varsa sil.
+            if (File.Exists(outputPath))
+                File.Delete(outputPath);
+
             await CreateConcatFileAsync(
                 concatFile,
                 segments);
@@ -107,20 +149,6 @@ public sealed class ReplayExporter
             }
 
             return outputPath;
-        }
-        finally
-        {
-            try
-            {
-                if (File.Exists(concatFile))
-                {
-                    File.Delete(concatFile);
-                }
-            }
-            catch
-            {
-                // Temizlik başarısız olsa da replay dosyasını etkilemesin.
-            }
         }
     }
 

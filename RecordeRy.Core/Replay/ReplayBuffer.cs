@@ -203,6 +203,14 @@ public sealed class ReplayBuffer : IAsyncDisposable
             $"-f segment " +
             $"-segment_time 2 " +
             $"-reset_timestamps 1 " +
+            // Parçalar fragmented MP4: dizin bilgisi (moov) başta, veri
+            // ~0,25 sn'lik fragment'larla eklenir. Normal MP4'te moov dosya
+            // kapanınca yazıldığından yazılmakta olan son parça okunamıyor,
+            // replay'in son 0–2 saniyesi kayboluyordu.
+            $"-segment_format_options " +
+            $"movflags=+frag_keyframe+empty_moov+default_base_moof:" +
+            $"frag_duration=250000 " +
+            $"-flush_packets 1 " +
             $"\"{outputPattern}\"";
 
         var startInfo =
@@ -253,6 +261,8 @@ public sealed class ReplayBuffer : IAsyncDisposable
         }
 
         _process = process;
+
+        ChildProcessTracker.Track(process);
 
         process.BeginErrorReadLine();
 

@@ -36,13 +36,19 @@ public static class FfmpegLocator
         if (legacy == null)
             return current;
 
-        if (await EncoderSelector.HasHardwareEncoderAsync(current))
+        // İki sürüm paralel denenir (sonuçlar önbelleğe alınır).
+        var currentProbe = EncoderSelector.HasHardwareEncoderAsync(current);
+        var legacyProbe = EncoderSelector.HasHardwareEncoderAsync(legacy);
+
+        await Task.WhenAll(currentProbe, legacyProbe);
+
+        if (currentProbe.Result)
         {
             DiagnosticsLog.Write($"FFmpeg: güncel sürüm seçildi ({current})");
             return current;
         }
 
-        if (await EncoderSelector.HasHardwareEncoderAsync(legacy))
+        if (legacyProbe.Result)
         {
             DiagnosticsLog.Write(
                 $"FFmpeg: güncel sürümde donanım encoder'ı açılamadı, " +

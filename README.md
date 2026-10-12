@@ -29,9 +29,7 @@ Windows için hafif bir **replay buffer** (anlık tekrar) kaydedici. Arka planda
 ## Geliştirme ortamını kurma
 
 1. Repoyu klonla.
-2. [gyan.dev ffmpeg builds](https://www.gyan.dev/ffmpeg/builds/) üzerinden iki Windows build indir ve `ffmpeg.exe` + `ffprobe.exe` dosyalarını koy:
-   - güncel sürüm (ör. 9.x) → `tools/ffmpeg/`
-   - [7.1.1](https://github.com/GyanD/codexffmpeg/releases/tag/7.1.1) → `tools/ffmpeg-legacy/`
+2. FFmpeg 7.1.1 (`tools/ffmpeg-legacy/`) repoyla birlikte gelir. Güncel sürümü (ör. 9.x) [gyan.dev ffmpeg builds](https://www.gyan.dev/ffmpeg/builds/) üzerinden indirip `ffmpeg.exe` + `ffprobe.exe` dosyalarını `tools/ffmpeg/` klasörüne koy — bu dosyalar GitHub'ın 100 MB sınırını aştığı için repoda değil. Koymazsan uygulama yalnızca legacy sürümle çalışır.
 3. `RecordeRy.sln`'i Visual Studio ile aç ya da `dotnet build` çalıştır.
 
 `RecordeRy.App` başlatıldığında FFmpeg'i çalıştığı klasörün yanındaki `ffmpeg/` ve `ffmpeg-legacy/` klasörlerinde veya üst dizinlerdeki `tools/` altında arar ([FfmpegLocator.cs](RecordeRy.Core/FfmpegLocator.cs)).

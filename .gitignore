@@ -6,7 +6,10 @@ obj/
 
 ## Build/publish artifacts (large binaries, generated per machine)
 publish/
-tools/
+tools/*
+# FFmpeg 7.1.1 (eski NVIDIA sürücüleri için) repoda tutulur; güncel
+# ffmpeg/ binary'leri GitHub'ın 100 MB dosya sınırını aştığı için tutulamaz.
+!tools/ffmpeg-legacy/
 
 ## Claude Code local settings
 .claude/settings.local.json
